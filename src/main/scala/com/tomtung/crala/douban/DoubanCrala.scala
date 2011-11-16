@@ -55,7 +55,7 @@ class DoubanCrala(getInputStream: URL => InputStream) extends Logging {
         tagsElem.getContent.getFirstElement(HTMLElementName.DIV)
           .getTextExtractor.toString.split("\\s+")
           .map("""(.+)\((\d+)\)""".r.findFirstMatchIn(_).get)
-          .map(m => m.group(1)->m.group(2)))
+          .map(m => m.group(1)->m.group(2)).toList)
     
     // Recommendations
     val recommendationsElem = source.getElementById("db-rec-section")
