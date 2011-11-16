@@ -24,10 +24,20 @@ class DoubanCrala(getInputStream: URL => InputStream) extends Logging {
     add("Title" -> source.getFirstElement(HTMLElementName.H1).getTextExtractor.toString.trim)
 
     // Info
-    val infoRenderer = source.getElementById("info").getRenderer
-    infoRenderer.setIncludeHyperlinkURLs(false)
-    infoRenderer.setMaxLineLength(Int.MaxValue)
-    val info = infoRenderer.toString.split("\n").map(i => i.trim.split(": ")).map(i => (i(0).trim, i(1).trim)).toMap
+    val info = {
+      val infoRenderer = source.getElementById("info").getRenderer
+      infoRenderer.setIncludeHyperlinkURLs(false)
+      infoRenderer.setMaxLineLength(Int.MaxValue)
+      def toKVPair(s: String) = {
+        val a = s.split(": ")
+        if (a.size == 2) a(0).trim -> a(1).trim
+        else {
+          logger.warn("Possible wrong entry information line(entry id=" + id + "): [" + s + "]")
+          null
+        }
+      }
+      infoRenderer.toString.split("\n").map(toKVPair).filter(_ != null).toMap
+    }
     // Artists
     if (info.contains("表演者"))
       add("Artists" -> info("表演者").split("/").map(_.trim).toList)
@@ -55,8 +65,8 @@ class DoubanCrala(getInputStream: URL => InputStream) extends Logging {
         tagsElem.getContent.getFirstElement(HTMLElementName.DIV)
           .getTextExtractor.toString.split("\\s+")
           .map("""(.+)\((\d+)\)""".r.findFirstMatchIn(_).get)
-          .map(m => m.group(1)->m.group(2)).toList)
-    
+          .map(m => m.group(1) -> m.group(2)).toList)
+
     // Recommendations
     val recommendationsElem = source.getElementById("db-rec-section")
     if (recommendationsElem != null)
