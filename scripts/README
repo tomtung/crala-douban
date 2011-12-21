@@ -1,0 +1,6 @@
+To execute the scripts:
+1. In the root directory of the project, execute:
+	sbt console
+2. Then execute:
+	:load scripts/{ScriptFileName}
+	e.g. :load scripts/CrawlMusicEntries.scala

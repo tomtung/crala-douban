@@ -1,1 +1,3 @@
 A douban crawler written in Scala.
+
+For example of usage, see files in the "scripts" folder.

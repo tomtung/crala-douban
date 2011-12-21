@@ -4,31 +4,34 @@ import java.net.URL
 import net.htmlparser.jericho.{HTMLElementName, Source}
 import scala.collection.JavaConversions._
 import com.weiglewilczek.slf4s.Logging
-import java.io.InputStream
 import collection.mutable.ListMap
+import java.lang.String
 
-class DoubanCrala(getInputStream: URL => InputStream) extends Logging {
-  def extractMusicEntry(id: String): Map[String, Any] = {
-    val entry = ListMap[String, Any]()
-    def add(kv: (String, Any)) {
+class DoubanCrala(loadSource: URL => Source) extends Logging {
+  def extractMusicEntry(id: String, fields: EntryField.ValueSet = EntryField.musicFields): Map[EntryField.Value, Any] = {
+    val entry = ListMap[EntryField.Value, Any]()
+    def add(kv: (EntryField.Value, Any)) {
       logger.debug(kv._1 + ": " + kv._2)
       entry += kv
     }
 
     // ID
-    add("ID" -> id)
+    if (fields.contains(EntryField.ID))
+      add(EntryField.ID -> id)
 
-    val source = new Source(getInputStream(new URL("http://music.douban.com/subject/" + id)))
+    val source = loadSource(new URL("http://music.douban.com/subject/" + id))
 
     // Title
-    add("Title" -> source.getFirstElement(HTMLElementName.H1).getTextExtractor.toString.trim)
+    if (fields.contains(EntryField.Title))
+      add(EntryField.Title -> source.getFirstElement(HTMLElementName.H1).getTextExtractor.toString.trim)
 
     // Info
     val info = {
       val infoRenderer = source.getElementById("info").getRenderer
       infoRenderer.setIncludeHyperlinkURLs(false)
+      infoRenderer.setIncludeAlternateText(false)
       infoRenderer.setMaxLineLength(Int.MaxValue)
-      def toKVPair(s: String) = {
+      def toKVPair(s: String): (String, String) = {
         val a = s.split(": ")
         if (a.size == 2) a(0).trim -> a(1).trim
         else {
@@ -38,62 +41,72 @@ class DoubanCrala(getInputStream: URL => InputStream) extends Logging {
       }
       infoRenderer.toString.split("\n").map(toKVPair).filter(_ != null).toMap
     }
+
     // Artists
-    if (info.contains("表演者"))
-      add("Artists" -> info("表演者").split("/").map(_.trim).toList)
+    if (fields.contains(EntryField.Artists) && info.contains("表演者"))
+      add(EntryField.Artists -> info("表演者").split("/").map(_.trim).toList)
+
     // Release date
-    if (info.contains("发行时间"))
-      add("Release Date" -> info("发行时间"))
+    if (fields.contains(EntryField.ReleaseDate) && info.contains("发行时间"))
+      add(EntryField.ReleaseDate -> info("发行时间"))
+
     // ISBN
-    if (info.contains("条型码"))
-      add("ISBN" -> info("条型码"))
+    if (fields.contains(EntryField.ISBN) && info.contains("条型码"))
+      add(EntryField.ISBN -> info("条型码"))
 
     // Rating count
-    val ratingCountElem = source.getFirstElement("property", "v:votes", false)
-    if (ratingCountElem != null)
-      add("Rating Count" -> ratingCountElem.getTextExtractor.toString.toInt)
+    if (fields.contains(EntryField.RatingCount)) {
+      val ratingCountElem = source.getFirstElement("property", "v:votes", false)
+      if (ratingCountElem != null)
+        add(EntryField.RatingCount -> ratingCountElem.getTextExtractor.toString.toInt)
+    }
 
     // Average rating
-    val avgRatingElem = source.getFirstElement("property", "v:average", false)
-    if (avgRatingElem != null && !avgRatingElem.getTextExtractor.toString.isEmpty)
-      add("Average Rating" -> avgRatingElem.getTextExtractor.toString.toDouble)
+    if (fields.contains(EntryField.AverageRating)) {
+      val avgRatingElem = source.getFirstElement("property", "v:average", false)
+      if (avgRatingElem != null)
+        add(EntryField.AverageRating -> avgRatingElem.getTextExtractor.toString.toDouble)
+    }
 
     // Tags (and the number of times they've been used)
-    val tagsElem = source.getElementById("db-tags-section")
-    if (tagsElem != null)
-      add("Tags" ->
-        tagsElem.getContent.getFirstElement(HTMLElementName.DIV)
+    if (fields.contains(EntryField.Tags)) {
+      val tagsElem = source.getElementById("db-tags-section")
+      if (tagsElem != null)
+        add(EntryField.Tags -> tagsElem.getContent.getFirstElement(HTMLElementName.DIV)
           .getTextExtractor.toString.split("\\s+")
           .map("""(.+)\((\d+)\)""".r.findFirstMatchIn(_).get)
           .map(m => m.group(1) -> m.group(2)).toList)
+    }
 
     // Recommendations
-    val recommendationsElem = source.getElementById("db-rec-section")
-    if (recommendationsElem != null)
-      add("Recommendations" ->
-        recommendationsElem.getContent.getAllElements(HTMLElementName.DD)
+    if (fields.contains(EntryField.Recommendations)) {
+      val recommendationsElem = source.getElementById("db-rec-section")
+      if (recommendationsElem != null)
+        add(EntryField.Recommendations -> recommendationsElem.getContent.getAllElements(HTMLElementName.DD)
           .map(_.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
           .map("""subject/(.+)/""".r.findFirstMatchIn(_).get.group(1)).toList)
+    }
 
     // Did/doing/wish count
-    val collectionsPage = new Source(getInputStream(new URL("http://music.douban.com/subject/" + id + "/collections")))
+    if (fields.contains(EntryField.DidCount) || fields.contains(EntryField.DoingCount) || fields.contains(EntryField.WishCount)) {
+      val collectionsPage = loadSource(new URL("http://music.douban.com/subject/" + id + "/collections"))
 
-    add("Did Count" ->
-      "\\d+".r.findFirstIn(
-        collectionsPage.getElementById("collections_bar").getTextExtractor.toString).get.toInt)
+      if (fields.contains(EntryField.DidCount))
+        add(EntryField.DidCount -> "\\d+".r.findFirstIn(collectionsPage.getElementById("collections_bar").getTextExtractor.toString).get.toInt)
 
-    val doingCountElem = collectionsPage.getElementById("doings_bar")
-    if (doingCountElem != null)
-      add("Doing Count" ->
-        "\\d+".r.findFirstIn(doingCountElem.getTextExtractor.toString).get.toInt)
+      if (fields.contains(EntryField.DoingCount)) {
+        val doingCountElem = collectionsPage.getElementById("doings_bar")
+        if (doingCountElem != null)
+          add(EntryField.DoingCount -> "\\d+".r.findFirstIn(doingCountElem.getTextExtractor.toString).get.toInt)
+      }
 
-    add("Wish Count" ->
-      "\\d+".r.findFirstIn(
-        collectionsPage.getElementById("wishes_bar").getTextExtractor.toString).get.toInt)
-
+      if (fields.contains(EntryField.DoingCount))
+        add(EntryField.WishCount -> "\\d+".r.findFirstIn(
+          collectionsPage.getElementById("wishes_bar").getTextExtractor.toString).get.toInt)
+    }
     logger.info("Extracted music entry, id=" + id)
     entry.toMap
   }
 }
 
-object DoubanCrala extends DoubanCrala(url => NaiveWebPageLoader.getInputStream(url))
+object DoubanCrala extends DoubanCrala(url => NaiveWebPageLoader.loadSource(url))

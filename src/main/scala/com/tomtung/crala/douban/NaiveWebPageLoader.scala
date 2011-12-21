@@ -3,14 +3,34 @@ package com.tomtung.crala.douban
 import java.net.URL
 import concurrent.Lock
 import java.lang.Thread
-import java.io.InputStream
 import util.Random
+import com.weiglewilczek.slf4s.Logging
+import net.htmlparser.jericho.Source
 
-class NaiveWebPageLoader(val timeout: Long) {
+class NaiveWebPageLoader(val timeout: Long) extends Logging {
   private val lock: Lock = new Lock()
   private val rand: Random = new Random()
+  private val maxRetryCount = 5
+  private val timeOut = 60000
+  private val exponentialBackOffThreshold = 5
+  private var successiveFailureCount = 0
 
-  def delayedUnlock() {
+  private def tryFor[T](times: Int)(op: => T): T = {
+    try {
+      op
+    }
+    catch {
+      case e: Throwable =>
+        if (times >= 1) {
+          logger.warn("Operation failed, will try later.", e)
+          Thread.sleep(5000)
+          tryFor(times - 1)(op)
+        }
+        else throw e
+    }
+  }
+
+  private def delayedUnlock() {
     new Thread(new Runnable() {
       def run() {
         Thread.sleep(timeout + rand.nextInt(500))
@@ -19,13 +39,32 @@ class NaiveWebPageLoader(val timeout: Long) {
     }).start()
   }
 
-  def getInputStream(url: URL): InputStream = {
+  def loadSource(url: URL): Source = {
     lock.acquire()
     try {
-      val connection = url.openConnection()
-      connection.setConnectTimeout(60000)
-      connection.setReadTimeout(60000)
-      connection.getInputStream
+      tryFor(maxRetryCount) {
+        val source = {
+          val connection = url.openConnection()
+          connection.setConnectTimeout(timeOut)
+          connection.setReadTimeout(timeOut)
+          new Source(connection)
+        }
+        source.fullSequentialParse()
+
+        successiveFailureCount = 0
+        source
+      }
+    }
+    catch {
+      case e: Throwable =>
+        logger.error("Faild to read from " + url, e)
+        successiveFailureCount += 1
+        if (successiveFailureCount > exponentialBackOffThreshold) {
+          val ms = (1 << (successiveFailureCount - 5)) * 30000
+          logger.info(successiveFailureCount + " successive failures. Now sleep for " + ms + "ms")
+          Thread.sleep(ms)
+        }
+        throw e
     }
     finally {
       delayedUnlock()
