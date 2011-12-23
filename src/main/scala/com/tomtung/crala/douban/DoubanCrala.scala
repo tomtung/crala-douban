@@ -1,111 +1,226 @@
 package com.tomtung.crala.douban
 
 import java.net.URL
-import net.htmlparser.jericho.{HTMLElementName, Source}
 import scala.collection.JavaConversions._
 import com.weiglewilczek.slf4s.Logging
-import collection.mutable.ListMap
 import java.lang.String
+import org.joda.time.DateTime
+import net.htmlparser.jericho.{Element, HTMLElementName, Source}
+import collection.immutable.Map
 
 class DoubanCrala(loadSource: URL => Source) extends Logging {
-  def extractMusicEntry(id: String, fields: EntryField.ValueSet = EntryField.musicFields): Map[EntryField.Value, Any] = {
-    val entry = ListMap[EntryField.Value, Any]()
-    def add(kv: (EntryField.Value, Any)) {
-      logger.debug(kv._1 + ": " + kv._2)
-      entry += kv
-    }
 
-    // ID
-    if (fields.contains(EntryField.ID))
-      add(EntryField.ID -> id)
+  type Entry = Map[EntryField.Value, Any]
 
-    val source = loadSource(new URL("http://music.douban.com/subject/" + id))
+  object EntryType extends Enumeration {
+    val Music, Movie = Value
+  }
 
-    // Title
-    if (fields.contains(EntryField.Title))
-      add(EntryField.Title -> source.getFirstElement(HTMLElementName.H1).getTextExtractor.toString.trim)
+  import EntryField._
 
-    // Info
-    val info = {
-      val infoRenderer = source.getElementById("info").getRenderer
-      infoRenderer.setIncludeHyperlinkURLs(false)
-      infoRenderer.setIncludeAlternateText(false)
-      infoRenderer.setMaxLineLength(Int.MaxValue)
-      def toKVPair(s: String): (String, String) = {
-        val a = s.split(": ")
-        if (a.size == 2) a(0).trim -> a(1).trim
-        else {
-          logger.warn("Possible wrong entry information line(entry id=" + id + "): [" + s + "]")
-          null
-        }
+  private def entryUrlToId: (String) => String = {
+    """subject/(.+)/""".r.findFirstMatchIn(_).get.group(1)
+  }
+
+  def fetchMusicEntry(id: String, fields: EntryField.ValueSet = EntryField.musicFields) =
+    fetchEntry(id, fields, EntryType.Music)
+
+  def fetchMusicEntries(ids: Iterable[String], fields: EntryField.ValueSet = EntryField.musicFields) =
+    fetchEntries(ids, fields, EntryType.Music)
+
+  def fetchMovieEntry(id: String, fields: EntryField.ValueSet = EntryField.movieFields) =
+    fetchEntry(id, fields, EntryType.Movie)
+
+  def fetchMovieEntries(ids: Iterable[String], fields: EntryField.ValueSet = EntryField.movieFields) =
+    fetchEntries(ids, fields, EntryType.Movie)
+
+  private def infoFieldsExtractors(page: () => Source, entryType: EntryType.Value) = {
+    lazy val info = {
+      val renderer = page().getElementById("info").getRenderer
+      renderer.setIncludeHyperlinkURLs(false)
+      renderer.setIncludeAlternateText(false)
+      renderer.setMaxLineLength(Int.MaxValue)
+      renderer
+    }.toString.split("\n")
+      .map(l => l.split(": ").map(_.trim).toList match {
+      case k :: v :: Nil => k -> v
+      case _ => {
+        logger.warn("Possibly wrong entry information line: \"" + l + "\"")
+        null
       }
-      infoRenderer.toString.split("\n").map(toKVPair).filter(_ != null).toMap
+    }).filter(_ != null).toMap
+
+    def infoValueExtractor(key: String) = () =>
+      if (info.contains(key)) Some(info(key)) else None
+    def infoListValueExtractor(key: String) = () =>
+      if (info.contains(key)) Some(info(key).split("/").map(_.trim).toList)
+      else None
+    val releaseDateExtractor = entryType match {
+      case EntryType.Movie =>
+        infoValueExtractor("上映日期")
+      case EntryType.Music =>
+        infoValueExtractor("发行时间")
     }
 
-    // Artists
-    if (fields.contains(EntryField.Artists) && info.contains("表演者"))
-      add(EntryField.Artists -> info("表演者").split("/").map(_.trim).toList)
+    Map(
+      Director -> infoListValueExtractor("导演"),
+      Screenwriter -> infoListValueExtractor("编剧"),
+      Cast -> infoListValueExtractor("主演"),
+      ReleaseDate -> releaseDateExtractor,
+      Language -> infoListValueExtractor("语言"),
+      Region -> infoListValueExtractor("制片国家/地区"),
+      Type -> infoListValueExtractor("类型"),
+      IMDb -> infoValueExtractor("IMDb链接"),
+      Artists -> infoListValueExtractor("表演者"),
+      ISBN -> infoValueExtractor("条型码")
+    )
+  }
 
-    // Release date
-    if (fields.contains(EntryField.ReleaseDate) && info.contains("发行时间"))
-      add(EntryField.ReleaseDate -> info("发行时间"))
-
-    // ISBN
-    if (fields.contains(EntryField.ISBN) && info.contains("条型码"))
-      add(EntryField.ISBN -> info("条型码"))
-
-    // Rating count
-    if (fields.contains(EntryField.RatingCount)) {
-      val ratingCountElem = source.getFirstElement("property", "v:votes", false)
-      if (ratingCountElem != null)
-        add(EntryField.RatingCount -> ratingCountElem.getTextExtractor.toString.toInt)
+  private def mainPageFieldsExtractors(id: String, entryType: EntryType.Value) = {
+    lazy val page = entryType match {
+      case EntryType.Movie =>
+        loadSource(new URL("http://movie.douban.com/subject/" + id))
+      case EntryType.Music =>
+        loadSource(new URL("http://music.douban.com/subject/" + id))
     }
-
-    // Average rating
-    if (fields.contains(EntryField.AverageRating)) {
-      val avgRatingElem = source.getFirstElement("property", "v:average", false)
-      if (avgRatingElem != null)
-        add(EntryField.AverageRating -> avgRatingElem.getTextExtractor.toString.toDouble)
-    }
-
-    // Tags (and the number of times they've been used)
-    if (fields.contains(EntryField.Tags)) {
-      val tagsElem = source.getElementById("db-tags-section")
-      if (tagsElem != null)
-        add(EntryField.Tags -> tagsElem.getContent.getFirstElement(HTMLElementName.DIV)
+    val titleExtractor = () =>
+      Some(page.getFirstElement(HTMLElementName.H1).getFirstElement(HTMLElementName.SPAN)
+        .getTextExtractor.toString.trim)
+    val ratingCountExtractor = () =>
+      page.getFirstElement("property", "v:votes", false) match {
+        case null => None
+        case e: Element => Some(e.getTextExtractor.toString.toInt)
+      }
+    val averageRatingExtractor = () =>
+      page.getFirstElement("property", "v:average", false) match {
+        case null => None
+        case e: Element => Some(e.getTextExtractor.toString.toDouble)
+      }
+    val tagExtractor = () =>
+      page.getElementById("db-tags-section") match {
+        case null => None
+        case e: Element => Some(e.getContent.getFirstElement(HTMLElementName.DIV)
           .getTextExtractor.toString.split("\\s+")
           .map("""(.+)\((\d+)\)""".r.findFirstMatchIn(_).get)
           .map(m => m.group(1) -> m.group(2)).toList)
-    }
-
-    // Recommendations
-    if (fields.contains(EntryField.Recommendations)) {
-      val recommendationsElem = source.getElementById("db-rec-section")
-      if (recommendationsElem != null)
-        add(EntryField.Recommendations -> recommendationsElem.getContent.getAllElements(HTMLElementName.DD)
+      }
+    val recommendationsExtractor = () =>
+      page.getElementById("db-rec-section") match {
+        case null => None
+        case e: Element => Some(e.getContent.getAllElements(HTMLElementName.DD)
           .map(_.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
-          .map("""subject/(.+)/""".r.findFirstMatchIn(_).get.group(1)).toList)
-    }
-
-    // Did/doing/wish count
-    if (fields.contains(EntryField.DidCount) || fields.contains(EntryField.DoingCount) || fields.contains(EntryField.WishCount)) {
-      val collectionsPage = loadSource(new URL("http://music.douban.com/subject/" + id + "/collections"))
-
-      if (fields.contains(EntryField.DidCount))
-        add(EntryField.DidCount -> "\\d+".r.findFirstIn(collectionsPage.getElementById("collections_bar").getTextExtractor.toString).get.toInt)
-
-      if (fields.contains(EntryField.DoingCount)) {
-        val doingCountElem = collectionsPage.getElementById("doings_bar")
-        if (doingCountElem != null)
-          add(EntryField.DoingCount -> "\\d+".r.findFirstIn(doingCountElem.getTextExtractor.toString).get.toInt)
+          .map(entryUrlToId).toList)
       }
 
-      if (fields.contains(EntryField.DoingCount))
-        add(EntryField.WishCount -> "\\d+".r.findFirstIn(
-          collectionsPage.getElementById("wishes_bar").getTextExtractor.toString).get.toInt)
+    Map(
+      Title -> titleExtractor,
+      RatingCount -> ratingCountExtractor,
+      AverageRating -> averageRatingExtractor,
+      Tags -> tagExtractor,
+      Recommendations -> recommendationsExtractor
+    ) ++ infoFieldsExtractors(() => page, entryType)
+  }
+
+  private def collectionsPageFieldsExtractors(id: String, entryType: EntryType.Value) = {
+    lazy val collectionsPage = entryType match {
+      case EntryType.Movie =>
+        loadSource(new URL("http://movie.douban.com/subject/" + id + "/collections"))
+      case EntryType.Music =>
+        loadSource(new URL("http://music.douban.com/subject/" + id + "/collections"))
     }
-    logger.info("Extracted music entry, id=" + id)
-    entry.toMap
+    val didCountExtractor = () => {
+      val text = collectionsPage.getElementById("collections_bar").getTextExtractor.toString
+      Some("\\d+".r.findFirstIn(text).get.toInt)
+    }
+    val doingCountExtractor = () =>
+      collectionsPage.getElementById("doings_bar") match {
+        case null => None
+        case e: Element => {
+          val text = e.getTextExtractor.toString
+          Some("\\d+".r.findFirstIn(text).get.toInt)
+        }
+      }
+    val wishCountExtractor = () => {
+      val text = collectionsPage.getElementById("wishes_bar").getTextExtractor.toString
+      Some("\\d+".r.findFirstIn(text).get.toInt)
+    }
+
+    Map(
+      DidCount -> didCountExtractor,
+      DoingCount -> doingCountExtractor,
+      WishCount -> wishCountExtractor
+    )
+  }
+
+  def fetchEntry(id: String, fields: EntryField.ValueSet, entryType: EntryType.Value): Entry = {
+    val fieldExtractor =
+      Map(ID -> (() => Some(id))) ++
+        mainPageFieldsExtractors(id, entryType) ++
+        collectionsPageFieldsExtractors(id, entryType)
+
+    val entry = fields.map(f => {
+      val v = fieldExtractor.getOrElse(f, () => None).apply()
+      (f, v)
+    }).filter(_._2.isDefined).map(t => t._1 -> t._2.get).toMap
+    logger.debug("Fetched " + entryType + " Entry, ID = " + id + ": " + entry)
+    entry
+  }
+
+  def fetchEntries(ids: Iterable[String], fields: EntryField.ValueSet, entryType: EntryType.Value) =
+    (for (id <- ids) yield try {
+      fetchEntry(id, fields, entryType)
+    }
+    catch {
+      case e: Throwable =>
+        logger.error("Failed to extract entry, id=" + id, e)
+        null
+    }).filter(_ != null)
+
+  def fetchWatchedMovieRatingsByUser(userId: String): Iterable[(String, Option[Int], DateTime)] = {
+    val pages = {
+      def pagesFrom(from: Int): Stream[Source] = try {
+        logger.debug("Fetching watched movies ratings by " + userId + ", start from " + from)
+        val url = new URL("http://movie.douban.com/people/" + userId + "/collect?mode=list&start=" + from)
+        val page = loadSource(url)
+        val numbers = page.getFirstElementByClass("subject-num").getTextExtractor.toString.split("""[^\d]+""").map(_.toInt).toArray
+        val pageStart = numbers(0);
+        val pageEnd = numbers(1);
+        val end = numbers(2)
+        if (pageStart > end) Stream.empty
+        else if (pageEnd == end) Stream(page)
+        else page #:: pagesFrom(pageEnd)
+      }
+      catch {
+        case e: Throwable =>
+          logger.error("Failed to load page (from " + from + ").", e)
+          null
+      }
+
+      pagesFrom(0).filter(_ != null)
+    }
+
+    def pageToItems(page: Source): Iterable[(String, Option[Int], DateTime)] = {
+
+      def elemToItem(e: Element): (String, Option[Int], DateTime) = try {
+        val id = entryUrlToId(e.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
+        val rating = e.getFirstElement(HTMLElementName.SPAN) match {
+          case null => None
+          case re => Some("""rating(\d)-t""".r.findFirstMatchIn(re.getAttributeValue("class")).get.group(1).toInt)
+        }
+        val date = DateTime.parse(e.getFirstElementByClass("date").getTextExtractor.toString.trim())
+
+        (id, rating, date)
+      }
+      catch {
+        case e: Throwable =>
+          logger.error("Failed to parse page.", e)
+          null
+      }
+
+      page.getAllElementsByClass("item-show").map(elemToItem).filter(_ != null)
+    }
+
+    pages.flatMap(pageToItems)
   }
 }
 

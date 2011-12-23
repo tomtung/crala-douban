@@ -15,7 +15,7 @@ class EntryCsvWriter(filename: String, fields: EntryField.ValueSet, append: Bool
       w
     }
 
-  def writer(entry: Map[EntryField.Value, Any]) {
+  def write(entry: Map[EntryField.Value, Any]) {
     writer.writeNext(fieldsArray.map(
       entry.get(_) match {
         case Some(l: List[Any]) => l.foldLeft("")((l, r) => l + ", " + r).substring(2)

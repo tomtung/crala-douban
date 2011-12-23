@@ -6,6 +6,7 @@ import java.lang.Thread
 import util.Random
 import com.weiglewilczek.slf4s.Logging
 import net.htmlparser.jericho.Source
+import java.io.FileNotFoundException
 
 class NaiveWebPageLoader(val timeout: Long) extends Logging {
   private val lock: Lock = new Lock()
@@ -20,6 +21,8 @@ class NaiveWebPageLoader(val timeout: Long) extends Logging {
       op
     }
     catch {
+      case e: FileNotFoundException =>
+        throw e
       case e: Throwable =>
         if (times >= 1) {
           logger.warn("Operation failed, will try later.", e)
