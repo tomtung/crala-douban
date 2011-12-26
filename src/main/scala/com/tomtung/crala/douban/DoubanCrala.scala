@@ -42,7 +42,7 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
       renderer.setMaxLineLength(Int.MaxValue)
       renderer
     }.toString.split("\n")
-      .map(l => l.split(": ").map(_.trim).toList match {
+      .map(l => l.split(": ", 2).map(_.trim).toList match {
       case k :: v :: Nil => k -> v
       case _ => {
         logger.warn("Possibly wrong entry information line: \"" + l + "\"")
@@ -178,43 +178,47 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
 
   def fetchWatchedMovieRatingsByUser(userId: String): Iterable[(String, Option[Int], DateTime)] = {
     val pages = {
-      def pagesFrom(from: Int): Stream[Source] = try {
-        logger.debug("Fetching watched movies ratings by " + userId + ", start from " + from)
-        val url = new URL("http://movie.douban.com/people/" + userId + "/collect?mode=list&start=" + from)
-        val page = loadSource(url)
-        val numbers = page.getFirstElementByClass("subject-num").getTextExtractor.toString.split("""[^\d]+""").map(_.toInt).toArray
-        val pageStart = numbers(0);
-        val pageEnd = numbers(1);
-        val end = numbers(2)
-        if (pageStart > end) Stream.empty
-        else if (pageEnd == end) Stream(page)
-        else page #:: pagesFrom(pageEnd)
-      }
-      catch {
-        case e: Throwable =>
-          logger.error("Failed to load page (from " + from + ").", e)
-          null
+      def pagesFrom(from: Int): Stream[Source] = {
+        try {
+          logger.debug("Fetching watched movies ratings by " + userId + ", start from " + from)
+          val url = new URL("http://movie.douban.com/people/" + userId + "/collect?mode=list&start=" + from)
+          val page = loadSource(url)
+          val numbers = page.getFirstElementByClass("subject-num").getTextExtractor.toString.split("""[^\d]+""").map(_.toInt).toArray
+          val pageStart = numbers(0);
+          val pageEnd = numbers(1);
+          val end = numbers(2)
+          if (pageStart > end) Stream.empty
+          else if (pageEnd == end) Stream(page)
+          else page #:: pagesFrom(pageEnd)
+        }
+        catch {
+          case e: Throwable =>
+            logger.error("Failed to load page (from " + from + ").", e)
+            Stream.empty
+        }
       }
 
-      pagesFrom(0).filter(_ != null)
+      pagesFrom(0)
     }
 
     def pageToItems(page: Source): Iterable[(String, Option[Int], DateTime)] = {
 
-      def elemToItem(e: Element): (String, Option[Int], DateTime) = try {
-        val id = entryUrlToId(e.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
-        val rating = e.getFirstElement(HTMLElementName.SPAN) match {
-          case null => None
-          case re => Some("""rating(\d)-t""".r.findFirstMatchIn(re.getAttributeValue("class")).get.group(1).toInt)
-        }
-        val date = DateTime.parse(e.getFirstElementByClass("date").getTextExtractor.toString.trim())
+      def elemToItem(e: Element): (String, Option[Int], DateTime) = {
+        try {
+          val id = entryUrlToId(e.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
+          val rating = e.getFirstElement(HTMLElementName.SPAN) match {
+            case null => None
+            case re => Some("""rating(\d)-t""".r.findFirstMatchIn(re.getAttributeValue("class")).get.group(1).toInt)
+          }
+          val date = DateTime.parse(e.getFirstElementByClass("date").getTextExtractor.toString.trim())
 
-        (id, rating, date)
-      }
-      catch {
-        case e: Throwable =>
-          logger.error("Failed to parse page.", e)
-          null
+          (id, rating, date)
+        }
+        catch {
+          case e: Throwable =>
+            logger.error("Failed to parse page.", e)
+            null
+        }
       }
 
       page.getAllElementsByClass("item-show").map(elemToItem).filter(_ != null)
