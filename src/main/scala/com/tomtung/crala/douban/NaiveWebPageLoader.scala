@@ -7,6 +7,7 @@ import util.Random
 import com.weiglewilczek.slf4s.Logging
 import net.htmlparser.jericho.Source
 import java.io.FileNotFoundException
+import scala.actors.Futures.future
 
 class NaiveWebPageLoader(val timeout: Long) extends Logging {
   private val lock: Lock = new Lock()
@@ -31,15 +32,6 @@ class NaiveWebPageLoader(val timeout: Long) extends Logging {
         }
         else throw e
     }
-  }
-
-  private def delayedUnlock() {
-    new Thread(new Runnable() {
-      def run() {
-        Thread.sleep(timeout + rand.nextInt(500))
-        lock.release()
-      }
-    }).start()
   }
 
   def loadSource(url: URL): Source = {
@@ -70,7 +62,10 @@ class NaiveWebPageLoader(val timeout: Long) extends Logging {
         throw e
     }
     finally {
-      delayedUnlock()
+      future {
+        Thread.sleep(timeout + rand.nextInt(500))
+        lock.release()
+      }
     }
   }
 }
