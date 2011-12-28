@@ -3,7 +3,6 @@ package com.tomtung.crala.douban
 import java.net.URL
 import scala.collection.JavaConversions._
 import com.weiglewilczek.slf4s.Logging
-import java.lang.String
 import org.joda.time.DateTime
 import net.htmlparser.jericho.{Element, HTMLElementName, Source}
 import collection.immutable.Map
@@ -18,9 +17,9 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
 
   import EntryField._
 
-  private def entryUrlToId: (String) => String = {
-    """subject/(.+)/""".r.findFirstMatchIn(_).get.group(1)
-  }
+  private def entryUrlToId(url: String) =
+  // Calling copy constructor here to avoid possible memory leakage
+    new String("""subject/(.+)/""".r.findFirstMatchIn(url).get.group(1))
 
   def fetchMusicEntry(id: String, fields: EntryField.ValueSet = EntryField.musicFields) =
     fetchEntry(id, fields, EntryType.Music)
