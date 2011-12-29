@@ -18,8 +18,7 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
   import EntryField._
 
   private def entryUrlToId(url: String) =
-  // Calling copy constructor here to avoid possible memory leakage
-    new String("""subject/(.+)/""".r.findFirstMatchIn(url).get.group(1))
+    """subject/(.+)/""".r.findFirstMatchIn(url).get.group(1)
 
   def fetchMusicEntry(id: String, fields: EntryField.ValueSet = EntryField.musicFields) =
     fetchEntry(id, fields, EntryType.Music)
@@ -39,15 +38,15 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
       renderer.setIncludeHyperlinkURLs(false)
       renderer.setIncludeAlternateText(false)
       renderer.setMaxLineLength(Int.MaxValue)
-      renderer
-    }.toString.split("\n")
-      .map(l => l.split(": ", 2).map(_.trim).toList match {
-      case k :: v :: Nil => k -> v
-      case _ => {
-        logger.warn("Possibly wrong entry information line: \"" + l + "\"")
-        null
-      }
-    }).filter(_ != null).toMap
+      renderer.toString.split("\n").map(l => l.split(": ", 2).map(_.trim)
+        .toList match {
+        case k :: v :: Nil => k -> new String(v) // Copy to avoid possible memory leakage
+        case _ => {
+          logger.warn("Possibly wrong entry information line: \"" + l + "\"")
+          null
+        }
+      }).filter(_ != null).toMap
+    }
 
     def infoValueExtractor(key: String) = () =>
       if (info.contains(key)) Some(info(key)) else None
@@ -101,14 +100,16 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
         case e: Element => Some(e.getContent.getFirstElement(HTMLElementName.DIV)
           .getTextExtractor.toString.split("\\s+")
           .map("""(.+)\((\d+)\)""".r.findFirstMatchIn(_).get)
-          .map(m => m.group(1) -> m.group(2)).toList)
+          .map(m => new String(m.group(1)) -> m.group(2).toInt).toList)
       }
     val recommendationsExtractor = () =>
       page.getElementById("db-rec-section") match {
         case null => None
         case e: Element => Some(e.getContent.getAllElements(HTMLElementName.DD)
           .map(_.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
-          .map(entryUrlToId).toList)
+          .map(entryUrlToId)
+          .map(new String(_)) // Copy to avoid possible memory leakage
+          .toList)
       }
 
     Map(
@@ -175,7 +176,7 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
         null
     }).filter(_ != null)
 
-  def fetchWatchedMovieRatingsByUser(userId: String): Iterable[(String, Option[Int], DateTime)] = {
+  def fetchWatchedMovieRatingsByUser(userId: String, start: Int = 0): Iterable[(String, Option[Int], DateTime)] = {
     val pages = {
       def pagesFrom(from: Int): Stream[Source] = {
         try {
@@ -197,14 +198,14 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
         }
       }
 
-      pagesFrom(0)
+      pagesFrom(start)
     }
 
     def pageToItems(page: Source): Iterable[(String, Option[Int], DateTime)] = {
 
       def elemToItem(e: Element): (String, Option[Int], DateTime) = {
         try {
-          val id = entryUrlToId(e.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
+          val id = new String(entryUrlToId(e.getFirstElement(HTMLElementName.A).getAttributeValue("href"))) // Copy to avoid possible memory leakage
           val rating = e.getFirstElement(HTMLElementName.SPAN) match {
             case null => None
             case re => Some("""rating(\d)-t""".r.findFirstMatchIn(re.getAttributeValue("class")).get.group(1).toInt)

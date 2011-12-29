@@ -51,6 +51,9 @@ class NaiveWebPageLoader(val timeout: Long) extends Logging {
       }
     }
     catch {
+      case e: FileNotFoundException =>
+        logger.error("Faild to read from " + url, e)
+        throw e
       case e: Throwable =>
         logger.error("Faild to read from " + url, e)
         successiveFailureCount += 1
