@@ -4,8 +4,8 @@ import java.net.URL
 import scala.collection.JavaConversions._
 import com.weiglewilczek.slf4s.Logging
 import org.joda.time.DateTime
-import net.htmlparser.jericho.{Element, HTMLElementName, Source}
 import collection.immutable.Map
+import net.htmlparser.jericho.{HTMLElementName, Element, Source}
 
 class DoubanCrala(loadSource: URL => Source) extends Logging {
 
@@ -32,9 +32,12 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
   def fetchMovieEntries(ids: Iterable[String], fields: EntryField.ValueSet = EntryField.movieFields) =
     fetchEntries(ids, fields, EntryType.Movie)
 
-  private def infoFieldsExtractors(page: () => Source, entryType: EntryType.Value) = {
+  /**
+   * Extractors for parsing the "info" block
+   */
+  private def infoFieldsExtractors(page: => Source, entryType: EntryType.Value) = {
     lazy val info = {
-      val renderer = page().getElementById("info").getRenderer
+      val renderer = page.getElementById("info").getRenderer
       renderer.setIncludeHyperlinkURLs(false)
       renderer.setIncludeAlternateText(false)
       renderer.setMaxLineLength(Int.MaxValue)
@@ -74,6 +77,11 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
     )
   }
 
+  import HTMLElementName._
+
+  /**
+   * Extractors for parsing the main Entry page
+   */
   private def mainPageFieldsExtractors(id: String, entryType: EntryType.Value) = {
     lazy val page = entryType match {
       case EntryType.Movie =>
@@ -82,7 +90,7 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
         loadSource(new URL("http://music.douban.com/subject/" + id))
     }
     val titleExtractor = () =>
-      Some(page.getFirstElement(HTMLElementName.H1).getFirstElement(HTMLElementName.SPAN)
+      Some(page.getFirstElement(H1).getFirstElement(SPAN)
         .getTextExtractor.toString.trim)
     val ratingCountExtractor = () =>
       page.getFirstElement("property", "v:votes", false) match {
@@ -97,16 +105,16 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
     val tagExtractor = () =>
       page.getElementById("db-tags-section") match {
         case null => None
-        case e: Element => Some(e.getContent.getFirstElement(HTMLElementName.DIV)
+        case e: Element => Some(e.getContent.getFirstElement(DIV)
           .getTextExtractor.toString.split("\\s+")
           .map("""(.+)\((\d+)\)""".r.findFirstMatchIn(_).get)
-          .map(m => new String(m.group(1)) -> m.group(2).toInt).toList)
+          .map(m => new String(m.group(1)) -> m.group(2).toInt).toList) // Copy to avoid possible memory leakage
       }
     val recommendationsExtractor = () =>
       page.getElementById("db-rec-section") match {
         case null => None
-        case e: Element => Some(e.getContent.getAllElements(HTMLElementName.DD)
-          .map(_.getFirstElement(HTMLElementName.A).getAttributeValue("href"))
+        case e: Element => Some(e.getContent.getAllElements(DD).view
+          .map(_.getFirstElement(A).getAttributeValue("href"))
           .map(entryUrlToId)
           .map(new String(_)) // Copy to avoid possible memory leakage
           .toList)
@@ -118,7 +126,7 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
       AverageRating -> averageRatingExtractor,
       Tags -> tagExtractor,
       Recommendations -> recommendationsExtractor
-    ) ++ infoFieldsExtractors(() => page, entryType)
+    ) ++ infoFieldsExtractors(page, entryType)
   }
 
   private def collectionsPageFieldsExtractors(id: String, entryType: EntryType.Value) = {
@@ -158,10 +166,8 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
         mainPageFieldsExtractors(id, entryType) ++
         collectionsPageFieldsExtractors(id, entryType)
 
-    val entry = fields.map(f => {
-      val v = fieldExtractor.getOrElse(f, () => None).apply()
-      (f, v)
-    }).filter(_._2.isDefined).map(t => t._1 -> t._2.get).toMap
+    val entry = fields.map(f => (f, fieldExtractor.getOrElse(f, () => None)()))
+      .filter(_._2.isDefined).map(t => t._1 -> t._2.get).toMap
     logger.debug("Fetched " + entryType + " Entry, ID = " + id + ": " + entry)
     entry
   }
@@ -205,8 +211,8 @@ class DoubanCrala(loadSource: URL => Source) extends Logging {
 
       def elemToItem(e: Element): (String, Option[Int], DateTime) = {
         try {
-          val id = new String(entryUrlToId(e.getFirstElement(HTMLElementName.A).getAttributeValue("href"))) // Copy to avoid possible memory leakage
-          val rating = e.getFirstElement(HTMLElementName.SPAN) match {
+          val id = new String(entryUrlToId(e.getFirstElement(A).getAttributeValue("href"))) // Copy to avoid possible memory leakage
+          val rating = e.getFirstElement(SPAN) match {
             case null => None
             case re => Some("""rating(\d)-t""".r.findFirstMatchIn(re.getAttributeValue("class")).get.group(1).toInt)
           }
